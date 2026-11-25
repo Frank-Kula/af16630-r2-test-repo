@@ -1,0 +1,245 @@
+openapi: 3.0.3
+info:
+  title: Petstore API (AF-16630 QA)
+  description: |
+    Professional sample OpenAPI specification for AF-16630 spec-first
+    Git reconnect testing. CRUD for pets with pagination and error models.
+  version: 1.0.0
+  contact:
+    name: QA Team
+    email: qa@example.com
+servers:
+  - url: https://petstore.example.com/api/v1
+    description: Production
+  - url: https://staging.petstore.example.com/api/v1
+    description: Staging
+tags:
+  - name: pets
+    description: Pet resources
+  - name: health
+    description: Service health
+security:
+  - bearerAuth: []
+paths:
+  /pets:
+    get:
+      tags: [pets]
+      summary: List pets
+      operationId: listPets
+      parameters:
+        - $ref: '#/components/parameters/PageLimit'
+        - $ref: '#/components/parameters/PageOffset'
+      responses:
+        '200':
+          description: A paginated list of pets
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pet'
+              example:
+                - id: 1
+                  name: A-Fu
+                  species: dog
+                  age: 3
+                  status: available
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [pets]
+      summary: Create a pet
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewPet'
+      responses:
+        '201':
+          description: Pet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /pets/{petId}:
+    parameters:
+      - $ref: '#/components/parameters/PetId'
+    get:
+      tags: [pets]
+      summary: Get a pet by id
+      operationId: getPet
+      responses:
+        '200':
+          description: The pet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [pets]
+      summary: Update a pet
+      operationId: updatePet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewPet'
+      responses:
+        '200':
+          description: Updated pet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [pets]
+      summary: Delete a pet
+      operationId: deletePet
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    PetId:
+      name: petId
+      in: path
+      required: true
+      description: Numeric id of the pet
+      schema:
+        type: integer
+        format: int64
+        minimum: 1
+    PageLimit:
+      name: limit
+      in: query
+      description: Page size
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    PageOffset:
+      name: offset
+      in: query
+      description: Page offset
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+  headers:
+    XTotalCount:
+      description: Total number of pets
+      schema:
+        type: integer
+  schemas:
+    Species:
+      type: string
+      enum: [dog, cat, bird, fish, other]
+    PetStatus:
+      type: string
+      enum: [available, pending, sold]
+    NewPet:
+      type: object
+      required: [name, species]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        species:
+          $ref: '#/components/schemas/Species'
+        age:
+          type: integer
+          minimum: 0
+          maximum: 50
+    Pet:
+      allOf:
+        - $ref: '#/components/schemas/NewPet'
+        - type: object
+          required: [id, status]
+          properties:
+            id:
+              type: integer
+              format: int64
+            status:
+              $ref: '#/components/schemas/PetStatus'
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: string
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        uptime:
+          type: number
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Authentication required
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: NOT_FOUND
+            message: Pet not found
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_FAILED
+            message: name is required
