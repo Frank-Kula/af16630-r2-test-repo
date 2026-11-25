@@ -1,0 +1,652 @@
+openapi: 3.0.3
+info:
+  title: Tars Commerce — Catalog Service
+  description: |
+    Product catalog domain of the **Tars Commerce** platform.
+
+    Merchandising writes flow through the admin endpoints; the public
+    storefront consumes the read endpoints with aggressive CDN caching.
+    Prices are represented as minor units (cents) plus an ISO 4217 currency
+    code to avoid floating point drift.
+
+    ### Conventions
+    * Offset pagination via `limit` / `offset`; collections expose `X-Total-Count`.
+    * Soft deletes only — `DELETE` marks a product `discontinued`, it never
+      removes history referenced by orders.
+    * Inventory is eventually consistent; counts may lag by up to 5 seconds.
+  version: 2.0.1
+  contact:
+    name: Platform API Team
+    email: api-platform@tars-commerce.example.com
+  license:
+    name: Proprietary
+    url: https://tars-commerce.example.com/legal/api-license
+externalDocs:
+  description: Catalog domain design notes
+  url: https://developers.tars-commerce.example.com/docs/catalog
+servers:
+  - url: https://api.tars-commerce.example.com/catalog/v2
+    description: Production
+  - url: https://staging.api.tars-commerce.example.com/catalog/v2
+    description: Staging
+tags:
+  - name: Products
+    description: Product search and lifecycle
+  - name: Categories
+    description: Merchandising taxonomy
+  - name: Inventory
+    description: Stock levels per warehouse
+security:
+  - bearerAuth: []
+paths:
+  /products:
+    get:
+      tags: [Products]
+      summary: Search products
+      description: |
+        Full-text search combined with structured filters. Multiple filters
+        are AND-combined. Results are ranked by relevance when `q` is given,
+        otherwise by `sort`.
+      operationId: searchProducts
+      security: []
+      parameters:
+        - name: q
+          in: query
+          description: Free-text query matched against title, brand and tags
+          schema:
+            type: string
+            maxLength: 200
+          example: 'running shoes'
+        - name: categoryId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: brand
+          in: query
+          schema:
+            type: string
+            maxLength: 80
+        - name: priceMin
+          in: query
+          description: Inclusive lower bound, minor units
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: priceMax
+          in: query
+          description: Inclusive upper bound, minor units
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: onSale
+          in: query
+          schema:
+            type: boolean
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [relevance, price_asc, price_desc, newest, bestselling]
+            default: relevance
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Matching product page
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+    post:
+      tags: [Products]
+      summary: Create a product (admin)
+      description: Requires the `catalog:products:write` scope.
+      operationId: createProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+            examples:
+              simple:
+                summary: Physical product with SKU
+                value:
+                  title: Trail Runner X2
+                  brand: Northpeak
+                  categoryId: 5f0d1e4a-9c3b-4a1d-8e2f-6b7c8d9e0f1a
+                  skus:
+                    - code: NP-TRX2-42
+                      price: { amount: 12999, currency: USD }
+                      stock: 42
+                  description: 'All-trail runner with carbon plate.'
+                  tags: [running, trail]
+      responses:
+        '201':
+          description: Product created
+          headers:
+            Location:
+              description: URL of the created product
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '409':
+          description: Duplicate SKU code
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /products/{productId}:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [Products]
+      summary: Get product details
+      operationId: getProduct
+      security: []
+      parameters:
+        - name: include
+          in: query
+          description: Side-loads related resources
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [categories, inventory, reviews_summary]
+            style: form
+            explode: false
+      responses:
+        '200':
+          description: Product record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Products]
+      summary: Update product (admin)
+      operationId: updateProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductUpdate'
+      responses:
+        '200':
+          description: Updated product
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Product'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Products]
+      summary: Discontinue a product (admin)
+      description: Soft delete. Purchasable flag is cleared; historical orders keep their line data.
+      operationId: discontinueProduct
+      responses:
+        '204':
+          description: Discontinued
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /products/{productId}/inventory:
+    parameters:
+      - $ref: '#/components/parameters/ProductId'
+    get:
+      tags: [Inventory]
+      summary: Get stock levels per warehouse
+      operationId: getInventory
+      security: []
+      responses:
+        '200':
+          description: Stock levels
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Inventory'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Inventory]
+      summary: Adjust stock (admin)
+      description: |
+        Delta adjustment, not absolute set — `delta: -3` reserves or removes
+        three units. Absolute sets are performed by the WMS sync pipeline.
+      operationId: adjustInventory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [skuCode, warehouseId, delta]
+              properties:
+                skuCode:
+                  type: string
+                warehouseId:
+                  type: string
+                  format: uuid
+                delta:
+                  type: integer
+                  description: Signed adjustment
+      responses:
+        '200':
+          description: Adjusted level
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Inventory'
+        '409':
+          description: Adjustment would drive stock negative
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List categories
+      operationId: listCategories
+      security: []
+      responses:
+        '200':
+          description: Top-level categories with children
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Category'
+    post:
+      tags: [Categories]
+      summary: Create a category (admin)
+      operationId: createCategory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name:
+                  type: string
+                  maxLength: 80
+                slug:
+                  type: string
+                  pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+                  maxLength: 100
+                parentId:
+                  type: string
+                  format: uuid
+                  nullable: true
+      responses:
+        '201':
+          description: Category created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '409':
+          description: Slug already used
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /categories/{categoryId}:
+    get:
+      tags: [Categories]
+      summary: Get category subtree
+      operationId: getCategory
+      security: []
+      parameters:
+        - name: categoryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Category with children
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Category'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Page size
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      description: Page offset
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    ProductId:
+      name: productId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 0d3f6a2e-71b4-4c8e-9a5d-2f8b1c4e7a90
+  headers:
+    XTotalCount:
+      description: Total number of elements across all pages
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+  responses:
+    NotFound:
+      description: Resource does not exist
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/not-found
+            title: Not found
+            status: 404
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/validation
+            title: Validation failed
+            status: 422
+            errors:
+              - field: skus[0].price.amount
+                rule: min
+                message: 'amount must be >= 0'
+  schemas:
+    Product:
+      type: object
+      required: [id, title, brand, status, skus, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        title:
+          type: string
+          maxLength: 200
+        brand:
+          type: string
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 5000
+          nullable: true
+        status:
+          type: string
+          enum: [draft, active, discontinued]
+        categoryId:
+          type: string
+          format: uuid
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 40
+        skus:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Sku'
+        rating:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 5
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+      example:
+        id: 0d3f6a2e-71b4-4c8e-9a5d-2f8b1c4e7a90
+        title: Trail Runner X2
+        brand: Northpeak
+        status: active
+        categoryId: 5f0d1e4a-9c3b-4a1d-8e2f-6b7c8d9e0f1a
+        tags: [running, trail]
+        skus:
+          - code: NP-TRX2-42
+            price: { amount: 12999, currency: USD }
+            stock: 42
+        rating: 4.6
+        createdAt: '2026-01-15T09:30:00Z'
+        updatedAt: '2026-05-02T12:00:45Z'
+    Sku:
+      type: object
+      required: [code, price]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z0-9-]{3,40}$'
+          description: Merchant SKU, unique per catalog
+        price:
+          $ref: '#/components/schemas/Money'
+        compareAtPrice:
+          $ref: '#/components/schemas/Money'
+          description: Optional strikethrough reference price
+        stock:
+          type: integer
+          readOnly: true
+        attributes:
+          type: object
+          description: Variant attributes, e.g. size / color
+          additionalProperties:
+            type: string
+    ProductInput:
+      type: object
+      required: [title, brand, categoryId, skus]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        brand:
+          type: string
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 5000
+        categoryId:
+          type: string
+          format: uuid
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 40
+        skus:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/SkuInput'
+    ProductUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        brand:
+          type: string
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 5000
+        status:
+          type: string
+          enum: [draft, active, discontinued]
+        categoryId:
+          type: string
+          format: uuid
+        tags:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            maxLength: 40
+    SkuInput:
+      type: object
+      required: [code, price]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z0-9-]{3,40}$'
+        price:
+          $ref: '#/components/schemas/Money'
+        compareAtPrice:
+          $ref: '#/components/schemas/Money'
+        attributes:
+          type: object
+          additionalProperties:
+            type: string
+    Category:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 80
+        slug:
+          type: string
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/Category'
+    Inventory:
+      type: object
+      required: [skuCode, warehouseId, available, reserved]
+      properties:
+        skuCode:
+          type: string
+        warehouseId:
+          type: string
+          format: uuid
+        available:
+          type: integer
+          minimum: 0
+        reserved:
+          type: integer
+          minimum: 0
+          description: Held by unpaid orders
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+      example:
+        skuCode: NP-TRX2-42
+        warehouseId: 71a2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+        available: 39
+        reserved: 3
+        updatedAt: '2026-06-20T14:22:10Z'
+    Money:
+      type: object
+      required: [amount, currency]
+      description: Minor-unit money amount
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Minor units, e.g. cents (12999 = $129.99)
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217
+      example:
+        amount: 12999
+        currency: USD
+    Problem:
+      type: object
+      description: RFC 7807 problem detail
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, rule]
+            properties:
+              field:
+                type: string
+              rule:
+                type: string
+              message:
+                type: string
