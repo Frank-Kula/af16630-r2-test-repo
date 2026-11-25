@@ -1,0 +1,577 @@
+openapi: 3.0.3
+info:
+  title: Tars Commerce — User & Authentication Service
+  description: |
+    Identity domain of the **Tars Commerce** platform.
+
+    This service owns account lifecycle, credential verification, token
+    issuance/refresh and the per-user address book. All endpoints are JSON
+    over HTTPS. Errors follow the RFC 7807 *problem details* convention.
+
+    ### Conventions
+    * Cursor-free offset pagination via `limit` / `offset` query parameters.
+    * Collection responses carry the total element count in `X-Total-Count`.
+    * All timestamps are RFC 3339 UTC.
+    * Bearer JWT access tokens (HS256, 15 min TTL); refresh tokens are
+      opaque strings with a 14 day TTL and single-use semantics.
+  version: 1.2.0
+  contact:
+    name: Platform API Team
+    email: api-platform@tars-commerce.example.com
+    url: https://developers.tars-commerce.example.com
+  license:
+    name: Proprietary
+    url: https://tars-commerce.example.com/legal/api-license
+externalDocs:
+  description: Identity domain design notes
+  url: https://developers.tars-commerce.example.com/docs/identity
+servers:
+  - url: https://api.tars-commerce.example.com/identity/v1
+    description: Production
+  - url: https://staging.api.tars-commerce.example.com/identity/v1
+    description: Staging
+    variables: {}
+tags:
+  - name: Authentication
+    description: Registration, login and token lifecycle
+  - name: Users
+    description: User profile management
+  - name: Addresses
+    description: Per-user address book
+security:
+  - bearerAuth: []
+paths:
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new account
+      description: |
+        Creates an account and sends a verification e-mail. The account is
+        usable immediately but carries `status: pending_verification` until
+        the e-mail link is followed; unverified accounts cannot place orders.
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistrationRequest'
+            examples:
+              standard:
+                summary: Minimal signup
+                value:
+                  email: dana.pike@example.com
+                  password: 'T8#kqLw2vZ'
+                  displayName: Dana Pike
+                  acceptedTermsVersion: '2024-11-01'
+      responses:
+        '201':
+          description: Account created (unconfirmed)
+          headers:
+            Location:
+              description: URL of the created user resource
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '409':
+          description: E-mail already registered
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://api.tars-commerce.example.com/problems/email-taken
+                title: E-mail already registered
+                status: 409
+                detail: 'An account for dana.pike@example.com already exists.'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Exchange credentials for tokens
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+      responses:
+        '200':
+          description: Token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Unknown e-mail or wrong password
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '423':
+          description: Account locked after repeated failures
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /auth/token/refresh:
+    post:
+      tags: [Authentication]
+      summary: Rotate an access token
+      description: |
+        Consumes a refresh token (single use) and returns a fresh token pair.
+        Reuse of an already-consumed refresh token revokes the whole family
+        as theft protection.
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+                  minLength: 32
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          description: Refresh token invalid, expired or replayed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get the authenticated user's profile
+      operationId: getMe
+      responses:
+        '200':
+          description: Current profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+    patch:
+      tags: [Users]
+      summary: Update the authenticated user's profile
+      description: Partial update; omitted fields keep their value. Changing `email` triggers re-verification.
+      operationId: updateMe
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /users/{userId}:
+    get:
+      tags: [Users]
+      summary: Get a user by id (staff only)
+      description: Requires the `identity:users:read` scope; internal support tooling only.
+      operationId: getUser
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: User record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '403':
+          description: Caller lacks the required scope
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /users/me/addresses:
+    get:
+      tags: [Addresses]
+      summary: List the authenticated user's addresses
+      operationId: listMyAddresses
+      responses:
+        '200':
+          description: Address book (newest first)
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                maxItems: 50
+                items:
+                  $ref: '#/components/schemas/Address'
+    post:
+      tags: [Addresses]
+      summary: Add an address
+      operationId: createAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressInput'
+      responses:
+        '201':
+          description: Address created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Address'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /users/me/addresses/{addressId}:
+    parameters:
+      - name: addressId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    put:
+      tags: [Addresses]
+      summary: Replace an address
+      operationId: replaceAddress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressInput'
+      responses:
+        '200':
+          description: Address replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Address'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Addresses]
+      summary: Delete an address
+      operationId: deleteAddress
+      responses:
+        '204':
+          description: Deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token issued by `/auth/login` or `/auth/token/refresh`.
+  parameters:
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 9f6c1b58-4a2e-4c70-9d5f-3e21b8a7cc01
+  headers:
+    XTotalCount:
+      description: Total number of elements across all pages
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+    XRateLimitRemaining:
+      description: Remaining calls in the current quota window
+      schema:
+        type: integer
+        minimum: 0
+  responses:
+    NotFound:
+      description: Resource does not exist (or is not visible to the caller)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/not-found
+            title: Not found
+            status: 404
+    ValidationError:
+      description: Request body failed schema or semantic validation
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/validation
+            title: Validation failed
+            status: 422
+            detail: 'password must contain at least one digit'
+            errors:
+              - field: password
+                rule: complexity
+    RateLimited:
+      description: Quota exceeded
+      headers:
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/XRateLimitRemaining'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/rate-limited
+            title: Too many requests
+            status: 429
+            detail: 'Retry after 37 seconds'
+  schemas:
+    User:
+      type: object
+      required: [id, email, displayName, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        phone:
+          type: string
+          pattern: '^\+[1-9][0-9]{6,14}$'
+          description: E.164 number, nullable until provided
+          nullable: true
+        status:
+          type: string
+          enum: [pending_verification, active, suspended, deactivated]
+        marketingOptIn:
+          type: boolean
+          default: false
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+          nullable: true
+      example:
+        id: 9f6c1b58-4a2e-4c70-9d5f-3e21b8a7cc01
+        email: dana.pike@example.com
+        displayName: Dana Pike
+        phone: '+14155550132'
+        status: active
+        marketingOptIn: true
+        createdAt: '2026-03-02T08:14:00Z'
+        updatedAt: '2026-06-11T17:40:12Z'
+    RegistrationRequest:
+      type: object
+      required: [email, password, displayName, acceptedTermsVersion]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          format: password
+          minLength: 10
+          maxLength: 128
+          description: Must contain upper case, lower case and a digit.
+        displayName:
+          type: string
+          minLength: 2
+          maxLength: 80
+        acceptedTermsVersion:
+          type: string
+          example: '2024-11-01'
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    TokenPair:
+      type: object
+      required: [accessToken, refreshToken, tokenType, expiresIn]
+      properties:
+        tokenType:
+          type: string
+          enum: [Bearer]
+        accessToken:
+          type: string
+          description: Compact JWS, 15 minute TTL
+        refreshToken:
+          type: string
+          description: Opaque single-use token, 14 day TTL
+        expiresIn:
+          type: integer
+          description: Access token lifetime in seconds
+          example: 900
+    ProfileUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        displayName:
+          type: string
+          minLength: 2
+          maxLength: 80
+        phone:
+          type: string
+          pattern: '^\+[1-9][0-9]{6,14}$'
+          nullable: true
+        marketingOptIn:
+          type: boolean
+        email:
+          type: string
+          format: email
+          description: Changing this resets verification status.
+    Address:
+      type: object
+      required: [id, recipient, line1, city, postalCode, country, isDefault]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        recipient:
+          type: string
+          maxLength: 120
+        company:
+          type: string
+          maxLength: 120
+          nullable: true
+        line1:
+          type: string
+          maxLength: 200
+        line2:
+          type: string
+          maxLength: 200
+          nullable: true
+        city:
+          type: string
+          maxLength: 80
+        region:
+          type: string
+          maxLength: 80
+          description: State / province / region code
+          nullable: true
+        postalCode:
+          type: string
+          maxLength: 20
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+          description: ISO 3166-1 alpha-2
+        phone:
+          type: string
+          pattern: '^\+[1-9][0-9]{6,14}$'
+        isDefault:
+          type: boolean
+    AddressInput:
+      type: object
+      required: [recipient, line1, city, postalCode, country]
+      properties:
+        recipient:
+          type: string
+          maxLength: 120
+        company:
+          type: string
+          maxLength: 120
+          nullable: true
+        line1:
+          type: string
+          maxLength: 200
+        line2:
+          type: string
+          maxLength: 200
+          nullable: true
+        city:
+          type: string
+          maxLength: 80
+        region:
+          type: string
+          maxLength: 80
+          nullable: true
+        postalCode:
+          type: string
+          maxLength: 20
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        phone:
+          type: string
+          pattern: '^\+[1-9][0-9]{6,14}$'
+        isDefault:
+          type: boolean
+          default: false
+    Problem:
+      type: object
+      description: RFC 7807 problem detail
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        errors:
+          type: array
+          description: Field-level details for validation problems
+          items:
+            type: object
+            required: [field, rule]
+            properties:
+              field:
+                type: string
+              rule:
+                type: string
+              message:
+                type: string
