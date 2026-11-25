@@ -1,0 +1,559 @@
+openapi: 3.0.3
+info:
+  title: Tars Commerce — Order & Payment Service
+  description: |
+    Order domain of the **Tars Commerce** platform.
+
+    Owns cart-to-order conversion, order lifecycle state transitions and
+    payment captures/refunds. Order creation is **idempotent**: replaying a
+    request with the same `Idempotency-Key` returns the original result
+    without creating a duplicate.
+
+    ### State machine
+    ```text
+    pending ── pay ──> paid ── fulfil ──> shipped ──> delivered
+       │                 │
+       └─ cancel ──> cancelled     refund ──> refunded
+    ```
+    Illegal transitions answer `409` with problem type
+    `…/problems/illegal-transition`.
+
+    ### Conventions
+    * All money values are minor units (cents) plus ISO 4217 currency.
+    * Timestamps are RFC 3339 UTC.
+    * Listing endpoints paginate via `limit` / `offset` with `X-Total-Count`.
+  version: 1.5.0
+  contact:
+    name: Platform API Team
+    email: api-platform@tars-commerce.example.com
+  license:
+    name: Proprietary
+    url: https://tars-commerce.example.com/legal/api-license
+externalDocs:
+  description: Order domain design notes
+  url: https://developers.tars-commerce.example.com/docs/orders
+servers:
+  - url: https://api.tars-commerce.example.com/orders/v1
+    description: Production
+  - url: https://staging.api.tars-commerce.example.com/orders/v1
+    description: Staging
+tags:
+  - name: Orders
+    description: Order lifecycle
+  - name: Payments
+    description: Capture and refunds
+security:
+  - bearerAuth: []
+paths:
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List the caller's orders
+      operationId: listOrders
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/OrderStatus'
+        - name: createdAfter
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [newest, oldest, total_asc, total_desc]
+            default: newest
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Order page (own orders only)
+          headers:
+            X-Total-Count:
+              $ref: '#/components/headers/XTotalCount'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Order'
+    post:
+      tags: [Orders]
+      summary: Create an order (checkout)
+      description: |
+        Converts a set of purchase lines into a `pending` order and reserves
+        stock. Reservation expires after 30 minutes if the order stays
+        unpaid. Supply a unique `Idempotency-Key` header per checkout attempt;
+        retries must reuse the same key **and** the same body.
+      operationId: createOrder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreateRequest'
+            examples:
+              singleLine:
+                summary: One SKU, default address
+                value:
+                  items:
+                    - skuCode: NP-TRX2-42
+                      quantity: 1
+                  shippingAddressId: 2b7e4c1a-93d5-4f68-b2c1-8e0a9d7f6e5c
+                  paymentMethod: credit_card
+      responses:
+        '201':
+          description: Order created in `pending` state
+          headers:
+            Location:
+              description: URL of the created order
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '409':
+          description: Idempotency key reused with a different body
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://api.tars-commerce.example.com/problems/idempotency-conflict
+                title: Idempotency key conflict
+                status: 409
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Too many checkout attempts
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      summary: Get order details
+      operationId: getOrder
+      responses:
+        '200':
+          description: Order with items and payments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Orders]
+      summary: Cancel an order
+      description: |
+        Allowed only while `pending` (unpaid). Paid orders must go through
+        `/orders/{orderId}/refund`. Releases the stock reservation.
+      operationId: cancelOrder
+      responses:
+        '200':
+          description: Cancelled order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '409':
+          description: Order no longer cancellable (already paid/shipped)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://api.tars-commerce.example.com/problems/illegal-transition
+                title: Illegal state transition
+                status: 409
+                detail: 'Order in state paid cannot transition to cancelled; use refund.'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /orders/{orderId}/payments:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Payments]
+      summary: Capture payment for an order
+      description: Charges the chosen method for the order total. Only valid on `pending` orders.
+      operationId: capturePayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '201':
+          description: Payment captured, order moved to `paid`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '402':
+          description: Payment declined by the processor
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://api.tars-commerce.example.com/problems/payment-declined
+                title: Payment declined
+                status: 402
+                detail: 'Issuer declined (code 05)'
+        '409':
+          description: Order not in payable state
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /orders/{orderId}/payments/{paymentId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+      - name: paymentId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [Payments]
+      summary: Get payment details
+      operationId: getPayment
+      responses:
+        '200':
+          description: Payment record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Payments]
+      summary: Refund a captured payment
+      description: Full refunds only; partial refunds are handled by support tooling.
+      operationId: refundPayment
+      responses:
+        '201':
+          description: Refund recorded, order moved to `refunded`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '409':
+          description: Payment not refundable in current state
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: c4e9a0b1-2d3f-4a5b-8c7d-6e5f4a3b2c1d
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated UUID; must be unique per logical operation
+      schema:
+        type: string
+        format: uuid
+  headers:
+    XTotalCount:
+      description: Total number of elements across all pages
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+  responses:
+    NotFound:
+      description: Resource does not exist (or belongs to another user)
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/not-found
+            title: Not found
+            status: 404
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://api.tars-commerce.example.com/problems/validation
+            title: Validation failed
+            status: 422
+            errors:
+              - field: items
+                rule: minItems
+                message: 'at least one order line is required'
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [pending, paid, processing, shipped, delivered, cancelled, refunded]
+      description: |
+        pending → paid → processing → shipped → delivered;
+        pending → cancelled; paid/processing/shipped → refunded.
+    Order:
+      type: object
+      required: [id, userId, status, items, totals, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        userId:
+          type: string
+          format: uuid
+          readOnly: true
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItem'
+        totals:
+          $ref: '#/components/schemas/OrderTotals'
+        shippingAddressId:
+          type: string
+          format: uuid
+        paymentMethod:
+          type: string
+          enum: [credit_card, debit_card, wallet, bank_transfer, cash_on_delivery]
+        payments:
+          type: array
+          readOnly: true
+          items:
+            $ref: '#/components/schemas/Payment'
+        placedAt:
+          type: string
+          format: date-time
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+        updatedAt:
+          type: string
+          format: date-time
+          readOnly: true
+      example:
+        id: c4e9a0b1-2d3f-4a5b-8c7d-6e5f4a3b2c1d
+        userId: 9f6c1b58-4a2e-4c70-9d5f-3e21b8a7cc01
+        status: paid
+        items:
+          - skuCode: NP-TRX2-42
+            title: Trail Runner X2
+            quantity: 1
+            unitPrice: { amount: 12999, currency: USD }
+        totals:
+          subtotal: { amount: 12999, currency: USD }
+          tax: { amount: 1098, currency: USD }
+          shipping: { amount: 0, currency: USD }
+          grandTotal: { amount: 14097, currency: USD }
+        shippingAddressId: 2b7e4c1a-93d5-4f68-b2c1-8e0a9d7f6e5c
+        paymentMethod: credit_card
+        placedAt: '2026-06-21T10:02:00Z'
+        createdAt: '2026-06-21T10:01:58Z'
+        updatedAt: '2026-06-21T10:03:11Z'
+    OrderItem:
+      type: object
+      required: [skuCode, title, quantity, unitPrice]
+      properties:
+        skuCode:
+          type: string
+        title:
+          type: string
+          readOnly: true
+          description: Product title snapshot at purchase time
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 999
+        unitPrice:
+          $ref: '#/components/schemas/Money'
+    OrderTotals:
+      type: object
+      required: [subtotal, tax, shipping, grandTotal]
+      properties:
+        subtotal:
+          $ref: '#/components/schemas/Money'
+        tax:
+          $ref: '#/components/schemas/Money'
+        shipping:
+          $ref: '#/components/schemas/Money'
+        grandTotal:
+          $ref: '#/components/schemas/Money'
+    OrderCreateRequest:
+      type: object
+      required: [items, shippingAddressId, paymentMethod]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [skuCode, quantity]
+            properties:
+              skuCode:
+                type: string
+              quantity:
+                type: integer
+                minimum: 1
+                maximum: 999
+        shippingAddressId:
+          type: string
+          format: uuid
+        paymentMethod:
+          type: string
+          enum: [credit_card, debit_card, wallet, bank_transfer, cash_on_delivery]
+        couponCode:
+          type: string
+          pattern: '^[A-Z0-9]{4,24}$'
+          nullable: true
+        customerNote:
+          type: string
+          maxLength: 500
+          nullable: true
+    Payment:
+      type: object
+      required: [id, orderId, amount, status, method, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        orderId:
+          type: string
+          format: uuid
+        amount:
+          $ref: '#/components/schemas/Money'
+        status:
+          type: string
+          enum: [captured, refunded, failed]
+        method:
+          type: string
+          enum: [credit_card, debit_card, wallet, bank_transfer, cash_on_delivery]
+        processorReference:
+          type: string
+          readOnly: true
+          description: PSP transaction id, for reconciliation
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+      example:
+        id: 7d1e2f3a-4b5c-4d6e-8f9a-0b1c2d3e4f5a
+        orderId: c4e9a0b1-2d3f-4a5b-8c7d-6e5f4a3b2c1d
+        amount: { amount: 14097, currency: USD }
+        status: captured
+        method: credit_card
+        processorReference: psp_tx_9f8e7d6c5b
+        createdAt: '2026-06-21T10:03:11Z'
+    PaymentRequest:
+      type: object
+      required: [instrumentToken]
+      properties:
+        instrumentToken:
+          type: string
+          description: |
+            Single-use token produced by the hosted payment fields (PCI scope
+            boundary). The raw PAN never reaches this service.
+          minLength: 16
+        saveInstrument:
+          type: boolean
+          default: false
+          description: Store the instrument for one-click repeat purchases
+    Money:
+      type: object
+      required: [amount, currency]
+      description: Minor-unit money amount
+      properties:
+        amount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Minor units, e.g. cents (14097 = $140.97)
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217
+      example:
+        amount: 14097
+        currency: USD
+    Problem:
+      type: object
+      description: RFC 7807 problem detail
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, rule]
+            properties:
+              field:
+                type: string
+              rule:
+                type: string
+              message:
+                type: string
